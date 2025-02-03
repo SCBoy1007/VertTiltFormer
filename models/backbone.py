@@ -175,85 +175,97 @@ class CNNBackbone(nn.Module):
         return x
 
 class ResNetBlock(nn.Module):
-    """Basic ResNet block with gradient checkpointing support"""
+    """
+    改进的ResNet块，支持可变通道数和更灵活的降采样
+    """
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, stride=stride, padding=1)
+        
+        # 主分支卷积
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, 
+                               stride=stride, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, 
+                               padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(out_channels)
         
+        # 短路连接处理
         self.shortcut = nn.Sequential()
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, 1, stride=stride),
+                nn.Conv2d(in_channels, out_channels, 1, 
+                          stride=stride, bias=False),
                 nn.BatchNorm2d(out_channels)
             )
     
-    def _forward_impl(self, x: torch.Tensor) -> torch.Tensor:
-        out = torch.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += self.shortcut(x)
-        out = torch.relu(out)
-        return out
-    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.training and torch.is_grad_enabled():
-            x.requires_grad_(True)
-            return checkpoint(self._forward_impl, x)
-        return self._forward_impl(x)
+        # 主分支计算
+        out = nn.functional.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        
+        # 短路连接
+        identity = self.shortcut(x)
+        out += identity
+        
+        # 激活
+        out = nn.functional.relu(out)
+        return out
 
 class ResNetBackbone(nn.Module):
-    """ResNet-style backbone with light downsampling and gradient checkpointing"""
+    """
+    重新设计的ResNet Backbone，专注于更有效的特征提取
+    """
     def __init__(
         self,
-        in_channels: int = 3,
+        in_channels: int = 1,  # 默认单通道
         base_channels: int = 64,
         output_channels: int = 256,
         num_blocks: Tuple[int, ...] = (2, 2, 2),
         use_checkpointing: bool = True
     ):
         super().__init__()
-        self.in_channels = base_channels
+        
         self.use_checkpointing = use_checkpointing
         
-        # Early light downsampling (2x reduction)
-        self.early_downsample = EarlyDownsample(in_channels, base_channels)
+        # 初始卷积层，专门处理单通道输入
+        self.initial_conv = nn.Sequential(
+            nn.Conv2d(in_channels, base_channels, kernel_size=3, 
+                      stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(base_channels),
+            nn.ReLU(inplace=True)
+        )
         
-        # 确保early_downsample的参数需要梯度
-        for param in self.early_downsample.parameters():
-            param.requires_grad_(True)
+        # 创建降采样阶段
+        self.stage1 = self._make_stage(base_channels, base_channels*2, num_blocks[0], stride=2)
+        self.stage2 = self._make_stage(base_channels*2, base_channels*4, num_blocks[1], stride=2)
+        self.stage3 = self._make_stage(base_channels*4, base_channels*8, num_blocks[2], stride=2)
         
-        # Create stages (no additional downsampling)
-        self.stage1 = self._make_stage(base_channels, num_blocks[0])
-        self.stage2 = self._make_stage(base_channels*2, num_blocks[1])
-        self.stage3 = self._make_stage(base_channels*4, num_blocks[2])
-        
-        # Final projection
-        self.proj = nn.Conv2d(base_channels*4, output_channels, 1)
-        self.proj.weight.requires_grad_(True)
-        if self.proj.bias is not None:
-            self.proj.bias.requires_grad_(True)
+        # 最终投影层
+        self.proj = nn.Conv2d(base_channels*8, output_channels, kernel_size=1)
         
         self._init_weights()
-        
-        # 确保所有参数都需要梯度
-        for param in self.parameters():
-            param.requires_grad_(True)
     
-    def _make_stage(self, out_channels: int, num_blocks: int, stride: int = 1) -> nn.Sequential:
+    def _make_stage(self, in_channels: int, out_channels: int, 
+                    num_blocks: int, stride: int = 1) -> nn.Sequential:
+        """
+        创建包含多个ResNet块的阶段，并支持降采样
+        """
         layers = []
-        # First block might have stride > 1
-        layers.append(ResNetBlock(self.in_channels, out_channels, stride))
-        self.in_channels = out_channels
         
-        # Rest of the blocks have stride = 1
-        for _ in range(num_blocks - 1):
-            layers.append(ResNetBlock(self.in_channels, out_channels, 1))
+        # 第一个块可能需要调整stride和通道数
+        layers.append(ResNetBlock(in_channels, out_channels, stride))
+        
+        # 后续块保持通道数不变
+        for _ in range(1, num_blocks):
+            layers.append(ResNetBlock(out_channels, out_channels, 1))
         
         return nn.Sequential(*layers)
     
     def _init_weights(self):
+        """
+        初始化网络权重，使用Kaiming初始化
+        """
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -263,25 +275,16 @@ class ResNetBackbone(nn.Module):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
     
-    def _forward_stage(self, stage: nn.Module, x: torch.Tensor) -> torch.Tensor:
-        if self.use_checkpointing and self.training and torch.is_grad_enabled():
-            x.requires_grad_(True)
-            return checkpoint(stage, x)
-        return stage(x)
-    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 确保输入需要梯度
-        if self.training and torch.is_grad_enabled():
-            x.requires_grad_(True)
-            
-        # Early light downsampling
-        x = self.early_downsample(x)
+        # 初始卷积
+        x = self.initial_conv(x)
         
-        # Forward through stages with gradient checkpointing
-        x = self._forward_stage(self.stage1, x)
-        x = self._forward_stage(self.stage2, x)
-        x = self._forward_stage(self.stage3, x)
+        # 通过阶段
+        x = self.stage1(x)  # 降采样到原尺寸1/2
+        x = self.stage2(x)  # 降采样到原尺寸1/4
+        x = self.stage3(x)  # 降采样到原尺寸1/8
         
-        # Final projection
+        # 最终投影
         x = self.proj(x)
+        
         return x

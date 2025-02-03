@@ -26,11 +26,10 @@ def train_model(
     val_dir: str,
     model_save_dir: str,
     num_epochs: int = 100,
-    batch_size: int = 2,        # 减小batch size以节省显存
+    batch_size: int = 4,        # 减小batch size以节省显存
     learning_rate: float = 1e-4,
     device: str = 'cuda',
-    num_keypoints: int = 18,
-    accumulation_steps: int = 8  # 增加梯度累积步数来补偿小batch size
+    num_keypoints: int = 18
 ):
     # 创建保存目录
     os.makedirs(model_save_dir, exist_ok=True)
@@ -74,29 +73,16 @@ def train_model(
         backbone_type='resnet', # 保持使用ResNet
         num_keypoints=num_keypoints,
         embed_dim=256,          # 保持embedding维度
-        num_encoder_layers=3,   # 减少transformer层数
-        num_decoder_layers=3,   # 减少transformer层数
+        num_encoder_layers=6,   # 减少transformer层数
+        num_decoder_layers=6,   # 减少transformer层数
         num_heads=4,            # 减少attention heads
         mlp_ratio=4.,          # 保持MLP比率
         dropout=0.1,
-        use_checkpointing=False # 关闭checkpointing以加快训练
+        use_checkpointing=True # 关闭checkpointing以加快训练
     ).to(device)
 
     # 立即设置为训练模式并确保requires_grad
     model.train()
-    for param in model.parameters():
-        param.requires_grad_(True)
-    
-    # 打印模型信息
-    print(f"\nModel created with:")
-    print(f"- Image size: (768, 256)")
-    print(f"- Backbone: ResNet")
-    print(f"- Embedding dimension: 256")
-    print(f"- Number of encoder/decoder layers: 3")
-    print(f"- Number of attention heads: 4")
-    print(f"- MLP ratio: 4.0\n")
-    
-    # 确保所有参数都需要梯度
     for param in model.parameters():
         param.requires_grad_(True)
     
@@ -191,26 +177,22 @@ def train_model(
                     
                     # 计算损失
                     loss, metrics = criterion(pred_keypoints, keypoints)
-                    loss = loss / accumulation_steps  # 缩放损失以适应梯度累积
                 
                 # 反向传播
                 scaler.scale(loss).backward()
-                
-                # 梯度累积
-                if (batch_idx + 1) % accumulation_steps == 0:
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad(set_to_none=True)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
                 
                 # 记录损失和指标
-                train_losses.append(loss.item() * accumulation_steps)  # 恢复原始损失大小
+                train_losses.append(loss.item())  # 恢复原始损失大小
                 for k, v in metrics.items():
                     if k in train_metrics:
                         train_metrics[k].append(v)
                 
                 # 更新进度条
                 pbar.set_postfix({
-                    'loss': f'{loss.item() * accumulation_steps:.6f}',
+                    'loss': f'{loss.item():.6f}',
                     'pixel_error': f'{metrics["mean_pixel_error"]:.6f}'
                 })
             except Exception as e:
@@ -338,25 +320,19 @@ def train_model(
 if __name__ == '__main__':
     # 设置CUDA内存分配器
     if torch.cuda.is_available():
-        # 限制GPU内存使用
-        torch.cuda.set_per_process_memory_fraction(0.8)
-        # 清理GPU缓存
-        torch.cuda.empty_cache()
-        # 设置cuDNN为确定性模式
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
     
     # 设置训练参数
     train_params = {
-        'train_dir': r'F:\RA-MED\Set Transformer\keypoint_detection\data\train',
-        'val_dir': r'F:\RA-MED\Set Transformer\keypoint_detection\data\test',
-        'model_save_dir': r'F:\RA-MED\Set Transformer\keypoint_detection\checkpoints',
+        'train_dir': r'I:\RA-MED\VertTiltFormer\keypoint_detection\data\train',
+        'val_dir': r'I:\RA-MED\VertTiltFormer\keypoint_detection\data\test',
+        'model_save_dir': r'I:\RA-MED\VertTiltFormer\keypoint_detection\checkpoints',
         'num_epochs': 100,
-        'batch_size': 2,        # 减小batch size以节省显存
-        'learning_rate': 1e-4,  # 保持较低的学习率
+        'batch_size': 4,        # 减小batch size以节省显存
+        'learning_rate': 2e-4,  # 保持较低的学习率
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-        'num_keypoints': 18,
-        'accumulation_steps': 8  # 增加梯度累积步数来补偿小batch size
+        'num_keypoints': 18
     }
     
     # 开始训练

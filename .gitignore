@@ -9,6 +9,5 @@
 *.pth
 *.pkl
 *.h5
-data/
-dataset(553)/
-checkpoints/
+data*/
+checkpoints*/

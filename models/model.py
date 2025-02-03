@@ -21,9 +21,9 @@ class KeypointDetector(nn.Module):
         num_decoder_layers: int = 6,
         num_heads: int = 8,
         mlp_ratio: float = 4.,
-        num_keypoints: int = 17,
+        num_keypoints: int = 18,
         dropout: float = 0.1,
-        pos_encoding_type: str = 'learned',
+        pos_encoding_type: str = '',
         use_checkpointing: bool = True
     ):
         super().__init__()
@@ -168,15 +168,15 @@ class KeypointDetector(nn.Module):
 def create_model(
     img_size: Tuple[int, int] = (768, 256),
     in_channels: int = 1,  # 修改为单通道灰度图
-    backbone_type: str = 'cnn',
+    backbone_type: str = 'resnet',
     embed_dim: int = 256,
     num_encoder_layers: int = 6,
     num_decoder_layers: int = 6,
     num_heads: int = 8,
     mlp_ratio: float = 4.,
-    num_keypoints: int = 17,
+    num_keypoints: int = 18,
     dropout: float = 0.1,
-    pos_encoding_type: str = 'learned',
+    pos_encoding_type: str = '',
     use_checkpointing: bool = True
 ) -> KeypointDetector:
     """Create a keypoint detection model with specified parameters"""
