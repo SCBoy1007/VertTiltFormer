@@ -123,38 +123,29 @@ class KeypointDataset(Dataset):
         # 如果是训练模式，进行数据增强
         if self.train:
             aug_images, aug_keypoints = self.augmentation(image, keypoints)
-            # 随机选择两个增强样本用于训练，这是实现的关键！
-            sample1_idx = np.random.randint(len(aug_images))
-            sample2_idx = np.random.randint(len(aug_images))
-            while sample2_idx == sample1_idx:  # 确保选择不同的样本
-                sample2_idx = np.random.randint(len(aug_images))
+            # 随机选择一个索引
+            random_idx = np.random.randint(len(aug_images))
+            image = aug_images[random_idx]  # 使用随机选择的增强样本
+            keypoints = aug_keypoints[random_idx]
 
-            # 返回两个随机选择的增强样本
-            img_tensor1 = F.to_tensor(aug_images[sample1_idx]).contiguous()
-            img_tensor2 = F.to_tensor(aug_images[sample2_idx]).contiguous()
+        # 将图像转换为 tensor 并确保连续性
+        img_tensor = F.to_tensor(image).contiguous()  # 这将创建一个 [1, H, W] 的张量
 
-            kp_tensor1 = torch.tensor(aug_keypoints[sample1_idx], dtype=torch.float32).contiguous()
-            kp_tensor2 = torch.tensor(aug_keypoints[sample2_idx], dtype=torch.float32).contiguous()
-
-            # 构建返回的字典，包含两个样本
-            sample = {
-                'image': torch.stack([img_tensor1, img_tensor2]),  # [2, 1, H, W]
-                'keypoints': torch.stack([kp_tensor1, kp_tensor2]),  # [2, num_keypoints, 2]
-                'transform_params': transform_params,
-                'image_id': os.path.basename(img_path),
-                'original_size': (orig_w, orig_h)
-            }
+        # 将关键点转换为 tensor 并确保连续性
+        if isinstance(keypoints, torch.Tensor):
+            kp_tensor = keypoints.clone().detach()
         else:
-            # 验证模式下只返回原始图像
-            img_tensor = F.to_tensor(image).contiguous()
-            kp_tensor = torch.tensor(keypoints, dtype=torch.float32).contiguous()
-            sample = {
-                'image': img_tensor.unsqueeze(0),  # [1, 1, H, W]
-                'keypoints': kp_tensor.unsqueeze(0),  # [1, num_keypoints, 2]
-                'transform_params': transform_params,
-                'image_id': os.path.basename(img_path),
-                'original_size': (orig_w, orig_h)
-            }
+            kp_tensor = torch.tensor(keypoints, dtype=torch.float32)
+        kp_tensor = kp_tensor.contiguous()
+
+        # 构建返回的字典
+        sample = {
+            'image': img_tensor,
+            'keypoints': kp_tensor,
+            'transform_params': transform_params,
+            'image_id': os.path.basename(img_path),
+            'original_size': (orig_w, orig_h)
+        }
 
         return sample
 
