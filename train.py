@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import gc
-
+from PIL import Image
 from dataset import KeypointDataset, collate_fn
 from models.model import create_model
 from models.loss import KeypointLoss
@@ -20,6 +20,28 @@ def clean_memory():
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def safe_mean(arr, metric_name=None):
+    """安全计算平均值，处理空数组和特殊指标"""
+    if len(arr) == 0:
+        return 0.0
+
+    # 转换为numpy数组以便处理
+    arr = np.array(arr)
+
+    # 移除无效值
+    valid_mask = ~(np.isnan(arr) | np.isinf(arr))
+    valid_values = arr[valid_mask]
+
+    if len(valid_values) == 0:
+        return 0.0
+
+    return float(np.mean(valid_values))
+
+def safe_add_metric(metrics_dict, key, value):
+    if not np.isnan(value) and not np.isinf(value):
+        metrics_dict[key].append(value)
 
 def train_model(
     train_dir: str,
@@ -242,7 +264,7 @@ def train_model(
                 clean_memory()
                 
                 images = batch['images'].to(device, non_blocking=True)
-                images.requires_grad_(True)  
+                # images.requires_grad_(True)
                 keypoints = [kpts.to(device, non_blocking=True) for kpts in batch['keypoints']]
                 
                 # 使用混合精度
@@ -253,7 +275,7 @@ def train_model(
                 val_losses.append(loss.item())
                 for k, v in metrics.items():
                     if k in val_metrics:
-                        val_metrics[k].append(v)
+                        safe_add_metric(val_metrics, k, v)
                 
                 pbar.set_postfix({
                     'loss': f'{loss.item():.6f}',
@@ -265,18 +287,20 @@ def train_model(
                 clean_memory()
         
         # 计算平均损失和指标
-        train_loss = np.mean(train_losses)
-        val_loss = np.mean(val_losses)
-        
+        train_loss = safe_mean(train_losses)
+        val_loss = safe_mean(val_losses)
         # 更新学习率
-        scheduler.step(val_loss)
-        
+        # scheduler.step()
+
         # 记录到TensorBoard
         writer.add_scalar('Loss/train', train_loss, epoch)
         writer.add_scalar('Loss/val', val_loss, epoch)
         for k in train_metrics:
-            writer.add_scalar(f'{k}/train', np.mean(train_metrics[k]), epoch)
-            writer.add_scalar(f'{k}/val', np.mean(val_metrics[k]), epoch)
+            train_mean = safe_mean(train_metrics[k], k)
+            val_mean = safe_mean(val_metrics[k], k)
+            if not np.isnan(train_mean) and not np.isnan(val_mean):
+                writer.add_scalar(f'{k}/train', train_mean, epoch)
+                writer.add_scalar(f'{k}/val', val_mean, epoch)
         
         # 验证集可视化
         if (epoch + 1) % 2 == 0:  # 每2个epoch
@@ -335,14 +359,14 @@ def train_model(
             }, os.path.join(model_save_dir, f'checkpoint_epoch_{epoch+1}.pth'))
         
         # 打印训练信息
-        print(f'Epoch {epoch+1}/{num_epochs}:')
-        print(f'Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}')
-        print(f'Train PCK@0.1: {np.mean(train_metrics["PCK@0.1"]):.6f}, '
-              f'Val PCK@0.1: {np.mean(val_metrics["PCK@0.1"]):.6f}')
-        print(f'Train Order Violations: {np.mean(train_metrics["order_violations"]):.2f}, '
-              f'Val Order Violations: {np.mean(val_metrics["order_violations"]):.2f}')
-        print(f'Train Pixel Error: {np.mean(train_metrics["mean_pixel_error"]):.6f}, '
-              f'Val Pixel Error: {np.mean(val_metrics["mean_pixel_error"]):.6f}')
+        print(f'Epoch {epoch + 1}/{num_epochs}:')
+        print(f'Train Loss: {safe_mean(train_losses):.6f}, Val Loss: {safe_mean(val_losses):.6f}')
+        print(f'Train PCK@0.1: {safe_mean(train_metrics["PCK@0.1"]):.6f}, '
+              f'Val PCK@0.1: {safe_mean(val_metrics["PCK@0.1"]):.6f}')
+        print(f'Train Order Violations: {safe_mean(train_metrics["order_violations"], "order_violations"):.2f}, '
+              f'Val Order Violations: {safe_mean(val_metrics["order_violations"], "order_violations"):.2f}')
+        print(f'Train Pixel Error: {safe_mean(train_metrics["mean_pixel_error"]):.6f}, '
+              f'Val Pixel Error: {safe_mean(val_metrics["mean_pixel_error"]):.6f}')
         
         # 每个epoch结束后清理内存
         if epoch < warmup_epochs:
