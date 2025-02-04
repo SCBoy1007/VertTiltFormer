@@ -56,6 +56,7 @@ def train_model(
         num_workers=2,
         collate_fn=collate_fn,
         pin_memory=True,
+        drop_last=True,
         persistent_workers=True
     )
     
@@ -66,7 +67,8 @@ def train_model(
         num_workers=2,
         collate_fn=collate_fn,
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=True,
+        drop_last=True,
     )
     
     # 创建模型（只减少transformer部分的复杂度）
@@ -93,12 +95,10 @@ def train_model(
     print(f"\nTrainable parameters: {trainable_params:,}")
     
     # 创建损失函数和优化器
-    criterion = KeypointOrderedLoss(
-        use_smooth_l1=True,
-        smooth_l1_beta=0.2,     # 减小beta使其对小误差更敏感
-        coord_weight=1.0,       # 坐标损失权重
-        order_weight=1.0,       # 顺序约束权重与坐标损失同等重要
-        relative_weight=True    # 使用自适应权重
+    criterion = KeypointLoss(
+        use_smooth_l1=False,
+        smooth_l1_beta=1,     
+        relative_weight=False    # 使用自适应权重
     )
     
     # 过滤出需要梯度的参数
@@ -357,8 +357,16 @@ def train_model(
 if __name__ == '__main__':
     # 设置CUDA内存分配器
     if torch.cuda.is_available():
+        # 启用cudnn benchmark以优化性能
         torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.enabled = True
+        
+        # 设置内存分配器
+        torch.cuda.empty_cache()
+        # 设置memory_format
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     
     # 设置训练参数
     train_params = {

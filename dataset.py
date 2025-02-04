@@ -33,7 +33,7 @@ class KeypointDataset(Dataset):
                     ann_path
                 ))
         # 数据增强
-        augmentation = KeypointAugmentation()
+        self.augmentation = KeypointAugmentation()
     
     def read_annotation(self, file_path):
         """Read keypoint annotations from file"""
@@ -111,9 +111,24 @@ class KeypointDataset(Dataset):
         # 转换为tensor并归一化到[-1,1]范围
         augmented_tensors = []
         for img, kp in zip(augmented_images, augmented_keypoints):
+            # 处理图像
             img_tensor = F.to_tensor(img)  # 会自动转换为[0,1]范围
             img_tensor = (img_tensor - 0.5) / 0.5  # 标准化到[-1,1]范围
-            kp_tensor = torch.from_numpy(kp).float()
+            img_tensor = img_tensor.contiguous()
+            
+            # 确保图像张量的维度正确
+            if len(img_tensor.shape) == 2:
+                img_tensor = img_tensor.unsqueeze(0)
+            
+            # 处理关键点
+            if not isinstance(kp, torch.Tensor):
+                kp_tensor = torch.from_numpy(kp).float()
+            else:
+                kp_tensor = kp.float()
+            
+            # 确保关键点张量的维度和内存布局正确
+            kp_tensor = kp_tensor.view(-1, 2).contiguous()
+            
             augmented_tensors.append({
                 'image': img_tensor,
                 'keypoints': kp_tensor,
@@ -122,6 +137,8 @@ class KeypointDataset(Dataset):
                 'original_size': (orig_w, orig_h)
             })
         
+        img_tensor = img_tensor.contiguous()
+        kp_tensor = kp_tensor.contiguous()
         return augmented_tensors
 
     
@@ -148,9 +165,19 @@ class KeypointAugmentation:
     """关键点检测的数据增强"""
     def __init__(self):
         pass
+
+    def _ensure_tensor(self, data):
+        """确保数据是torch.Tensor类型"""
+        if not isinstance(data, torch.Tensor):
+            return torch.from_numpy(data).float()
+        return data
     
+
     def __call__(self, image, keypoints):
         """应用数据增强到图像和关键点"""
+
+        keypoints = self._ensure_tensor(keypoints)
+
         # 初始化增强后的图像和关键点列表
         augmented_images = [image]
         augmented_keypoints = [keypoints]
@@ -195,7 +222,12 @@ class KeypointAugmentation:
         """旋转图像和关键点"""
         if len(keypoints) == 0:
             return image, keypoints
-        
+
+        keypoints = self._ensure_tensor(keypoints)
+
+        if not isinstance(keypoints, torch.Tensor):
+            keypoints = torch.from_numpy(keypoints).float()
+
         # 计算几何中心点
         center_x, center_y = keypoints.mean(dim=0)
         
@@ -238,6 +270,12 @@ class KeypointAugmentation:
 
     def _translate_image_and_keypoints(self, image, keypoints, direction):
         """平移图像和关键点"""
+        keypoints = self._ensure_tensor(keypoints)
+        # 确保keypoints是torch.Tensor
+        if not isinstance(keypoints, torch.Tensor):
+            keypoints = torch.from_numpy(keypoints).float()
+        
+        # 现在可以安全地使用torch操作
         x_min, y_min = keypoints.min(dim=0).values
         x_max, y_max = keypoints.max(dim=0).values
         
@@ -263,12 +301,16 @@ class KeypointAugmentation:
         translated_image = F.affine(image, angle=0, translate=(-dx_pixels, -dy_pixels), scale=1.0, shear=0)
         
         # 更新关键点坐标
+        keypoints = keypoints.clone()  # 创建副本以避免修改原始数据
         keypoints[:, 0] = keypoints[:, 0] - dx
         keypoints[:, 1] = keypoints[:, 1] - dy
         
         # 确保关键点在范围内
         keypoints[:, 0] = keypoints[:, 0].clamp(0, 1)
         keypoints[:, 1] = keypoints[:, 1].clamp(0, 1)
+        
+        # 如果需要，转回numpy
+        # keypoints = keypoints.numpy()
         
         return translated_image, keypoints
 
@@ -278,6 +320,11 @@ class KeypointAugmentation:
         mirrored_keypoints = []
         
         for image, keypoints in zip(images, keypoints_list):
+            keypoints = self._ensure_tensor(keypoints)
+            # 确保keypoints是torch.Tensor
+            if not isinstance(keypoints, torch.Tensor):
+                keypoints = torch.from_numpy(keypoints).float()
+                
             # 镜像图像
             mirrored_image = F.hflip(image)
             # 镜像关键点
@@ -288,15 +335,32 @@ class KeypointAugmentation:
         
         return mirrored_images, mirrored_keypoints
 
-        
+
 def collate_fn(batch):
     """自定义的collate函数"""
     all_samples = []
     for sample in batch:
         all_samples.extend(sample)
     
-    images = torch.stack([item['image'] for item in all_samples])
-    keypoints = [item['keypoints'] for item in all_samples]
+    # Ensure images are contiguous and in correct format
+    images = []
+    for item in all_samples:
+        img = item['image']
+        if not img.is_contiguous():
+            img = img.contiguous()
+        if len(img.shape) == 2:
+            img = img.unsqueeze(0)
+        images.append(img)
+    images = torch.stack(images)
+    
+    # Process keypoints
+    keypoints = []
+    for item in all_samples:
+        kp = item['keypoints']
+        if not kp.is_contiguous():
+            kp = kp.contiguous()
+        keypoints.append(kp.view(-1, 2))
+    
     transform_params = [item['transform_params'] for item in all_samples]
     image_ids = [item['image_id'] for item in all_samples]
     original_sizes = [item['original_size'] for item in all_samples]
