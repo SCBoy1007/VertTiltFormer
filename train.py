@@ -28,6 +28,8 @@ def train_model(
     num_epochs: int = 100,
     batch_size: int = 4,        # 减小batch size以节省显存
     learning_rate: float = 1e-4,
+    max_grad_norm: float = 1.0,    # 添加梯度裁剪阈值
+    warmup_epochs: int = 5,        # 添加warmup epochs
     device: str = 'cuda',
     num_keypoints: int = 18
 ):
@@ -109,8 +111,19 @@ def train_model(
         betas=(0.9, 0.95)
     )
     
-    # 学习率调度器
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    # 修改学习率调度器，添加warmup
+    def get_lr_multiplier(epoch):
+        if epoch < warmup_epochs:
+            return (epoch + 1) / warmup_epochs
+        return 1.0
+    
+    scheduler = optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=get_lr_multiplier
+    )
+    
+    # 添加ReduceLROnPlateau作为第二个调度器
+    reduce_lr = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode='min',
         factor=0.5,
@@ -178,12 +191,17 @@ def train_model(
                     # 计算损失
                     loss, metrics = criterion(pred_keypoints, keypoints)
                 
-                # 反向传播
+                # 修改反向传播部分
                 scaler.scale(loss).backward()
+                
+                # 添加梯度裁剪
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
-                
+
                 # 记录损失和指标
                 train_losses.append(loss.item())  # 恢复原始损失大小
                 for k, v in metrics.items():
@@ -224,7 +242,7 @@ def train_model(
                 clean_memory()
                 
                 images = batch['images'].to(device, non_blocking=True)
-                images.requires_grad_(True)  # 即使在验证阶段也设置requires_grad以保持一致性
+                images.requires_grad_(True)  
                 keypoints = [kpts.to(device, non_blocking=True) for kpts in batch['keypoints']]
                 
                 # 使用混合精度
@@ -261,7 +279,7 @@ def train_model(
             writer.add_scalar(f'{k}/val', np.mean(val_metrics[k]), epoch)
         
         # 验证集可视化
-        if (epoch + 1) % 10 == 0:  # 每10个epoch
+        if (epoch + 1) % 2 == 0:  # 每2个epoch
             vis_dir = os.path.join(model_save_dir, f'vis_epoch_{epoch+1}')
             create_validation_visualization(
                 model,
@@ -273,12 +291,26 @@ def train_model(
             
             # 添加TensorBoard图像
             for img_path in os.listdir(vis_dir)[:2]:  # 添加2个样本
-                img = plt.imread(os.path.join(vis_dir, img_path))
-                writer.add_image(
-                    f'Predictions/{img_path}',
-                    img.transpose(2, 0, 1),
-                    epoch
-                )
+                try:
+                    img = Image.open(os.path.join(vis_dir, img_path))
+                    # 如果需要调整图像大小，使用新的采样方法
+                    # img = img.resize((width, height), Image.Resampling.LANCZOS)  # 新版本
+                    
+                    # 转换为numpy数组
+                    img = np.array(img)
+                    
+                    # 确保图像是uint8类型且范围在0-255
+                    if img.dtype == np.float32 or img.dtype == np.float64:
+                        img = (img * 255).astype(np.uint8)
+                    # 如果图像是RGBA，转换为RGB
+                    if img.shape[-1] == 4:
+                        img = img[:, :, :3]
+                    # 转换为TensorBoard期望的格式 (C, H, W)
+                    img = img.transpose(2, 0, 1)
+                    writer.add_image(f'Predictions/{img_path}', img, epoch)
+                except Exception as e:
+                    print(f"Error adding image to TensorBoard: {str(e)}")
+                    continue
         
         # 保存最佳模型
         if val_loss < best_val_loss:
@@ -288,11 +320,12 @@ def train_model(
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
+                'reduce_lr_state_dict': reduce_lr.state_dict(),
                 'best_val_loss': best_val_loss,
             }, os.path.join(model_save_dir, 'best_model.pth'))
         
         # 保存checkpoint
-        if (epoch + 1) % 20 == 0:  # 每20个epoch
+        if (epoch + 1) % 10 == 0:  # 每10个epoch
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -312,6 +345,10 @@ def train_model(
               f'Val Pixel Error: {np.mean(val_metrics["mean_pixel_error"]):.6f}')
         
         # 每个epoch结束后清理内存
+        if epoch < warmup_epochs:
+            scheduler.step()
+        else:
+            reduce_lr.step(val_loss)
         clean_memory()
     
     writer.close()
@@ -329,8 +366,10 @@ if __name__ == '__main__':
         'val_dir': r'I:\RA-MED\VertTiltFormer\keypoint_detection\data\test',
         'model_save_dir': r'I:\RA-MED\VertTiltFormer\keypoint_detection\checkpoints',
         'num_epochs': 100,
-        'batch_size': 4,        # 减小batch size以节省显存
-        'learning_rate': 2e-4,  # 保持较低的学习率
+        'batch_size': 16,        
+        'learning_rate': 2e-4,  
+        'max_grad_norm': 1.0,    
+        'warmup_epochs': 5,     
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
         'num_keypoints': 18
     }

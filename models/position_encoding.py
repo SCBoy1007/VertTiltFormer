@@ -32,37 +32,32 @@ class PositionalEncoding1D(nn.Module):
         return x + self.pe[:, :x.size(1)]
 
 class PositionalEncoding2D(nn.Module):
-    """2D sinusoidal positional encoding for image-like inputs"""
     def __init__(self, d_model: int, max_h: int = 1536, max_w: int = 512):
         super().__init__()
         
         if d_model % 4 != 0:
             raise ValueError(f"Cannot use sin/cos positional encoding with odd dimension (got dim={d_model})")
         
-        # 计算特征图尺寸（2倍下采样）
-        feat_h = max_h // 2  # 768
-        feat_w = max_w // 2  # 256
+        # Calculate feature map size without automatic downsampling
+        feat_h = max_h  # Remove the //2 to match your input size
+        feat_w = max_w
         
         pe = torch.zeros(feat_h, feat_w, d_model)
         d_model = int(d_model / 2)
         
-        # Create position indices for feature map size
         y_position = torch.arange(0, feat_h, dtype=torch.float).unsqueeze(1)
         x_position = torch.arange(0, feat_w, dtype=torch.float).unsqueeze(1)
         
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         
-        # Apply positional encoding for height dimension
         pe_h = torch.zeros(feat_h, 1, d_model)
         pe_h[:, 0, 0::2] = torch.sin(y_position * div_term)
         pe_h[:, 0, 1::2] = torch.cos(y_position * div_term)
         
-        # Apply positional encoding for width dimension
         pe_w = torch.zeros(1, feat_w, d_model)
         pe_w[0, :, 0::2] = torch.sin(x_position * div_term)
         pe_w[0, :, 1::2] = torch.cos(x_position * div_term)
         
-        # Combine height and width encodings
         pe[:, :, :d_model] = pe_h + pe_w
         pe[:, :, d_model:] = pe_h + pe_w
         
@@ -73,13 +68,6 @@ class PositionalEncoding2D(nn.Module):
         self.max_w = max_w
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Tensor of shape (B, H*W, D)
-        
-        Returns:
-            Tensor of shape (B, H*W, D) with positional encoding added
-        """
         return x + self.pe[:, :x.size(1)]
 
 class LearnedPositionalEncoding(nn.Module):

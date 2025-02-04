@@ -69,7 +69,7 @@ def visualize_predictions(
     fig_size: tuple = (20, 10)
 ) -> None:
     """
-    可视化预测结果
+    可视化预测结果，支持RGB和灰度图像
     
     Args:
         image: 输入图像tensor (C, H, W)
@@ -81,6 +81,12 @@ def visualize_predictions(
     """
     # 转换图像为numpy数组
     img_np = image.permute(1, 2, 0).numpy()
+    
+    # 处理灰度图像
+    if img_np.shape[-1] == 1:
+        img_np = np.repeat(img_np, 3, axis=-1)  # 将单通道转换为三通道
+    
+    # 归一化到0-255范围
     img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min())
     img_np = (img_np * 255).astype(np.uint8)
     
@@ -100,6 +106,7 @@ def visualize_predictions(
     target_kpts = denormalize_keypoints(target_keypoints)
     
     # 创建图像网格
+    plt.close('all')  # 清除之前的图像
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=fig_size)
     
     # 绘制预测结果
@@ -115,6 +122,7 @@ def visualize_predictions(
     )
     ax1.imshow(img_pred)
     ax1.set_title('Predictions')
+    ax1.axis('off')
     
     # 绘制目标关键点
     img_target = img_pil.copy()
@@ -128,6 +136,7 @@ def visualize_predictions(
     )
     ax2.imshow(img_target)
     ax2.set_title('Ground Truth')
+    ax2.axis('off')
     
     # 添加额外信息
     plt.suptitle(f'Image Size: {img_pil.size}')
