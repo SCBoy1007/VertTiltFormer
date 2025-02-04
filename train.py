@@ -12,7 +12,7 @@ import gc
 
 from dataset import KeypointDataset, collate_fn
 from models.model import create_model
-from models.loss import KeypointOrderedLoss
+from models.loss import KeypointLoss
 from visualization import create_validation_visualization
 
 def clean_memory():
