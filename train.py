@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import gc
-from PIL import Image
+from PIL import Image, ImageOps
 from dataset import KeypointDataset, collate_fn
 from models.model import create_model
 from models.loss import KeypointLoss
@@ -119,8 +119,9 @@ def train_model(
     # 创建损失函数和优化器
     criterion = KeypointLoss(
         use_smooth_l1=False,
-        smooth_l1_beta=1,     
-        relative_weight=False    # 使用自适应权重
+        smooth_l1_beta=1,        # 使用自适应权重
+        x_weight = 3.0,  # x坐标的权重
+        y_weight = 1.0  # y坐标的权重
     )
     
     # 过滤出需要梯度的参数
@@ -171,8 +172,12 @@ def train_model(
         model.train()
         train_losses = []
         train_metrics = {
-            'coord_loss': [],
-            'order_loss': [],
+            'x_loss': [],
+            'y_loss': [],
+            'mean_x_error': [],
+            'mean_y_error': [],
+            'max_x_error': [],
+            'max_y_error': [],
             'mean_pixel_error': [],
             'PCK@0.1': [],
             'order_violations': []
@@ -250,8 +255,12 @@ def train_model(
         model.eval()
         val_losses = []
         val_metrics = {
-            'coord_loss': [],
-            'order_loss': [],
+            'x_loss': [],
+            'y_loss': [],
+            'mean_x_error': [],
+            'mean_y_error': [],
+            'max_x_error': [],
+            'max_y_error': [],
             'mean_pixel_error': [],
             'PCK@0.1': [],
             'order_violations': []
@@ -276,10 +285,11 @@ def train_model(
                 for k, v in metrics.items():
                     if k in val_metrics:
                         safe_add_metric(val_metrics, k, v)
-                
+
                 pbar.set_postfix({
                     'loss': f'{loss.item():.6f}',
-                    'pixel_error': f'{metrics["mean_pixel_error"]:.6f}'
+                    'x_error': f'{metrics["mean_x_error"]:.6f}',
+                    'y_error': f'{metrics["mean_y_error"]:.6f}'
                 })
                 
                 # 清理显存
@@ -312,23 +322,24 @@ def train_model(
                 vis_dir,
                 num_samples=4
             )
-            
+
             # 添加TensorBoard图像
             for img_path in os.listdir(vis_dir)[:2]:  # 添加2个样本
                 try:
                     img = Image.open(os.path.join(vis_dir, img_path))
-                    # 如果需要调整图像大小，使用新的采样方法
-                    # img = img.resize((width, height), Image.Resampling.LANCZOS)  # 新版本
-                    
-                    # 转换为numpy数组
+
+                    # 直接转换为numpy数组，不做resize
                     img = np.array(img)
-                    
+
                     # 确保图像是uint8类型且范围在0-255
                     if img.dtype == np.float32 or img.dtype == np.float64:
                         img = (img * 255).astype(np.uint8)
                     # 如果图像是RGBA，转换为RGB
-                    if img.shape[-1] == 4:
+                    if len(img.shape) == 3 and img.shape[-1] == 4:
                         img = img[:, :, :3]
+                    # 确保图像是3通道的
+                    if len(img.shape) == 2:  # 如果是灰度图
+                        img = np.stack([img] * 3, axis=-1)
                     # 转换为TensorBoard期望的格式 (C, H, W)
                     img = img.transpose(2, 0, 1)
                     writer.add_image(f'Predictions/{img_path}', img, epoch)
@@ -361,12 +372,10 @@ def train_model(
         # 打印训练信息
         print(f'Epoch {epoch + 1}/{num_epochs}:')
         print(f'Train Loss: {safe_mean(train_losses):.6f}, Val Loss: {safe_mean(val_losses):.6f}')
-        print(f'Train PCK@0.1: {safe_mean(train_metrics["PCK@0.1"]):.6f}, '
-              f'Val PCK@0.1: {safe_mean(val_metrics["PCK@0.1"]):.6f}')
-        print(f'Train Order Violations: {safe_mean(train_metrics["order_violations"], "order_violations"):.2f}, '
-              f'Val Order Violations: {safe_mean(val_metrics["order_violations"], "order_violations"):.2f}')
-        print(f'Train Pixel Error: {safe_mean(train_metrics["mean_pixel_error"]):.6f}, '
-              f'Val Pixel Error: {safe_mean(val_metrics["mean_pixel_error"]):.6f}')
+        print(f'Train X Error: {safe_mean(train_metrics["mean_x_error"]):.6f}, '
+              f'Val X Error: {safe_mean(val_metrics["mean_x_error"]):.6f}')
+        print(f'Train Y Error: {safe_mean(train_metrics["mean_y_error"]):.6f}, '
+              f'Val Y Error: {safe_mean(val_metrics["mean_y_error"]):.6f}')
         
         # 每个epoch结束后清理内存
         if epoch < warmup_epochs:
