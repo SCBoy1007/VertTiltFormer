@@ -8,17 +8,19 @@ import torchvision.transforms.functional as F
 
 class KeypointDataset(Dataset):
     """Dataset for keypoint detection"""
+
     def __init__(
-        self,
-        img_dir: str,
-        annotation_dir: str,
-        train: bool = True
+            self,
+            img_dir: str,
+            annotation_dir: str,
+            train: bool = True,
+            max_aug_samples: int = 2  # 添加新参数
     ):
         self.img_dir = img_dir
         self.annotation_dir = annotation_dir
         self.train = train
 
-        # Get all valid image-annotation pairs
+        # 获取所有有效的图像-标注对
         self.samples = []
         for img_name in os.listdir(img_dir):
             if not img_name.endswith('.png'):
@@ -32,8 +34,9 @@ class KeypointDataset(Dataset):
                     os.path.join(img_dir, img_name),
                     ann_path
                 ))
-        # 数据增强（注意：旋转操作已移除，仅保留平移和镜像增强）
-        self.augmentation = KeypointAugmentation()
+
+        # 初始化数据增强器，传入最大增强样本数量
+        self.augmentation = KeypointAugmentation(max_aug_samples=max_aug_samples)
 
     def read_annotation(self, file_path):
         """Read keypoint annotations from file"""
@@ -107,11 +110,15 @@ class KeypointDataset(Dataset):
 
     def __getitem__(self, index):
         """根据索引返回数据样本"""
+        # 计算原始样本索引和增强样本索引
+        original_idx = index // self.augmentation.max_aug_samples
+        aug_idx = index % self.augmentation.max_aug_samples
+
         # 获取当前样本的图片和标注路径
-        img_path, ann_path = self.samples[index]
+        img_path, ann_path = self.samples[original_idx]
 
         # 读取图像为灰度图
-        image = Image.open(img_path).convert('L')  # 'L' 模式表示灰度图
+        image = Image.open(img_path).convert('L')
 
         # 读取关键点标注
         keypoints = self.read_annotation(ann_path)
@@ -123,20 +130,18 @@ class KeypointDataset(Dataset):
         # 如果是训练模式，进行数据增强
         if self.train:
             aug_images, aug_keypoints = self.augmentation(image, keypoints)
-            # 随机选择一个索引
-            random_idx = np.random.randint(len(aug_images))
-            image = aug_images[random_idx]  # 使用随机选择的增强样本
-            keypoints = aug_keypoints[random_idx]
+            # 使用aug_idx选择对应的增强样本
+            image = aug_images[aug_idx]
+            keypoints = aug_keypoints[aug_idx]
 
-        # 将图像转换为 tensor 并确保连续性
-        img_tensor = F.to_tensor(image).contiguous()  # 这将创建一个 [1, H, W] 的张量
+        # 将图像转换为tensor
+        img_tensor = F.to_tensor(image)
 
-        # 将关键点转换为 tensor 并确保连续性
+        # 确保关键点是tensor
         if isinstance(keypoints, torch.Tensor):
-            kp_tensor = keypoints.clone().detach()
+            kp_tensor = keypoints
         else:
             kp_tensor = torch.tensor(keypoints, dtype=torch.float32)
-        kp_tensor = kp_tensor.contiguous()
 
         # 构建返回的字典
         sample = {
@@ -149,10 +154,11 @@ class KeypointDataset(Dataset):
 
         return sample
 
-
     def __len__(self):
+        if self.train:
+            # 考虑数据增强后的总样本数
+            return len(self.samples) * self.augmentation.max_aug_samples
         return len(self.samples)
-
 
 
 
@@ -160,34 +166,48 @@ class KeypointDataset(Dataset):
 # 数据增强，已移除旋转增强，仅保留平移和镜像
 class KeypointAugmentation:
     """关键点检测的数据增强（仅保留平移和镜像）"""
-    def __init__(self):
-        pass
+
+    def __init__(self, max_aug_samples=10):
+        self.max_aug_samples = min(max(1, max_aug_samples), 10)  # 确保在1-10之间
 
     def _ensure_tensor(self, data):
         """确保数据是 torch.Tensor 类型"""
         if not isinstance(data, torch.Tensor):
             return torch.from_numpy(data).float()
         return data
-    
 
     def __call__(self, image, keypoints):
         """应用数据增强到图像和关键点"""
         keypoints = self._ensure_tensor(keypoints)
 
-        # 初始化增强后的图像和关键点列表
-        augmented_images = [image]
-        augmented_keypoints = [keypoints]
-        
-        # 平移增强
-        translated_images, translated_keypoints = self.translate(augmented_images, augmented_keypoints)
-        augmented_images.extend(translated_images)
-        augmented_keypoints.extend(translated_keypoints)
-        
-        # 镜像增强
-        mirrored_images, mirrored_keypoints = self.mirror(augmented_images, augmented_keypoints)
-        augmented_images.extend(mirrored_images)
-        augmented_keypoints.extend(mirrored_keypoints)
-        
+        # 生成所有可能的增强样本
+        all_augmented_images = [image]  # 原始图像
+        all_augmented_keypoints = [keypoints]  # 原始关键点
+
+        # 平移增强（4个样本）
+        translated_images, translated_keypoints = self.translate([image], [keypoints])
+        all_augmented_images.extend(translated_images)
+        all_augmented_keypoints.extend(translated_keypoints)
+
+        # 镜像增强（对所有已有样本进行镜像，再生成5个）
+        mirrored_images, mirrored_keypoints = self.mirror(all_augmented_images, all_augmented_keypoints)
+        all_augmented_images.extend(mirrored_images)
+        all_augmented_keypoints.extend(mirrored_keypoints)
+
+        # 如果需要的样本数小于最大数量，随机选择所需数量的样本
+        if self.max_aug_samples < len(all_augmented_images):
+            # 始终保留原始图像（索引0），从其余样本中随机选择
+            indices = [0] + list(np.random.choice(
+                range(1, len(all_augmented_images)),
+                size=self.max_aug_samples - 1,
+                replace=False
+            ))
+            augmented_images = [all_augmented_images[i] for i in indices]
+            augmented_keypoints = [all_augmented_keypoints[i] for i in indices]
+        else:
+            augmented_images = all_augmented_images
+            augmented_keypoints = all_augmented_keypoints
+
         return augmented_images, augmented_keypoints
 
     def translate(self, images, keypoints_list):
@@ -262,7 +282,7 @@ class KeypointAugmentation:
         """水平镜像增强"""
         mirrored_images = []
         mirrored_keypoints = []
-        
+
         for image, keypoints in zip(images, keypoints_list):
             keypoints = self._ensure_tensor(keypoints)
             # 镜像图像
@@ -272,37 +292,37 @@ class KeypointAugmentation:
             mirrored_kps[:, 0] = 1 - mirrored_kps[:, 0]
             mirrored_images.append(mirrored_image)
             mirrored_keypoints.append(mirrored_kps)
-        
+
         return mirrored_images, mirrored_keypoints
 
 
 def collate_fn(batch):
     """自定义的 collate 函数"""
-    all_samples = []
-    for sample in batch:
-        all_samples.append(sample)
-    
     images = []
-    for item in all_samples:
-        img = item['image']
-        if not img.is_contiguous():
-            img = img.contiguous()
+    keypoints = []
+    transform_params = []
+    image_ids = []
+    original_sizes = []
+
+    for sample in batch:
+        # 处理图像
+        img = sample['image']
         if len(img.shape) == 2:
             img = img.unsqueeze(0)
         images.append(img)
-    images = torch.stack(images).contiguous()
-    
-    keypoints = []
-    for item in all_samples:
-        kp = item['keypoints']
-        if not kp.is_contiguous():
-            kp = kp.contiguous()
+
+        # 处理关键点
+        kp = sample['keypoints']
         keypoints.append(kp.view(-1, 2))
-    
-    transform_params = [item['transform_params'] for item in all_samples]
-    image_ids = [item['image_id'] for item in all_samples]
-    original_sizes = [item['original_size'] for item in all_samples]
-    
+
+        # 收集其他信息
+        transform_params.append(sample['transform_params'])
+        image_ids.append(sample['image_id'])
+        original_sizes.append(sample['original_size'])
+
+    # 堆叠所有图像
+    images = torch.stack(images)
+
     return {
         'images': images,
         'keypoints': keypoints,

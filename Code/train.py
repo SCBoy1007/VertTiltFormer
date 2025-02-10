@@ -62,7 +62,8 @@ def train_model(
     train_dataset = KeypointDataset(
         img_dir=os.path.join(train_dir, 'images'),
         annotation_dir=os.path.join(train_dir, 'annotations'),
-        train=True
+        train=True,
+        max_aug_samples=10
     )
     
     val_dataset = KeypointDataset(
@@ -407,7 +408,7 @@ if __name__ == '__main__':
         'val_dir': r"I:\RA-MED\VertTiltFormer\keypoint_detection\Data\data\train",
         'model_save_dir': r"I:\RA-MED\VertTiltFormer\keypoint_detection\Data\checkpoints",
         'num_epochs': 100,
-        'batch_size': 16,        
+        'batch_size': 16,
         'learning_rate': 2e-4,  
         'max_grad_norm': 1.0,    
         'warmup_epochs': 5,     
