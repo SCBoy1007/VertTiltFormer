@@ -53,7 +53,10 @@ def train_model(
     max_grad_norm: float = 1.0,    # 添加梯度裁剪阈值
     warmup_epochs: int = 5,        # 添加warmup epochs
     device: str = 'cuda',
-    num_keypoints: int = 18
+    num_keypoints: int = 18,
+    max_aug_samples: int = 10,
+    resume_from_checkpoint: str = None,
+    start_epoch: int = 0           # 开始的epoch
 ):
     # 创建保存目录
     os.makedirs(model_save_dir, exist_ok=True)
@@ -63,7 +66,7 @@ def train_model(
         img_dir=os.path.join(train_dir, 'images'),
         annotation_dir=os.path.join(train_dir, 'annotations'),
         train=True,
-        max_aug_samples=10
+        max_aug_samples=max_aug_samples
     )
     
     val_dataset = KeypointDataset(
@@ -158,17 +161,53 @@ def train_model(
     
     # 创建梯度缩放器用于混合精度训练
     scaler = GradScaler()
-    
+    # 在train_model函数中，修改加载checkpoint的部分：
+
+    if resume_from_checkpoint and os.path.exists(resume_from_checkpoint):
+        print(f"Loading checkpoint from {resume_from_checkpoint}")
+        checkpoint = torch.load(resume_from_checkpoint, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+
+        # 重新创建优化器和调度器，而不是加载它们的状态
+        optimizer = optim.AdamW(
+            trainable_params,
+            lr=learning_rate,
+            weight_decay=0.01,
+            betas=(0.9, 0.95)
+        )
+
+        scheduler = optim.lr_scheduler.LambdaLR(
+            optimizer,
+            lr_lambda=get_lr_multiplier
+        )
+
+        reduce_lr = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=0.5,
+            patience=5,
+            verbose=True,
+            min_lr=1e-6
+        )
+
+        # 重新创建梯度缩放器
+        scaler = GradScaler()
+
+        start_epoch = checkpoint['epoch'] + 1
+        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        print(f"Resuming from epoch {start_epoch}")
+    else:
+        best_val_loss = float('inf')
     # TensorBoard
     writer = SummaryWriter(
-        os.path.join(model_save_dir, 'logs'),
+        os.path.join(model_save_dir, f'logs_continued_from_epoch_{start_epoch}'),
         max_queue=10,
         flush_secs=60
     )
     
     # 训练循环
     best_val_loss = float('inf')
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         # 训练阶段
         model.train()
         train_losses = []
@@ -218,8 +257,10 @@ def train_model(
                     
                     # 计算损失
                     loss, metrics = criterion(pred_keypoints, keypoints)
-                
+
+
                 # 修改反向传播部分
+                optimizer.zero_grad(set_to_none=True)  # 确保在每个batch开始时清零梯度
                 scaler.scale(loss).backward()
                 
                 # 添加梯度裁剪
@@ -228,7 +269,7 @@ def train_model(
                 
                 scaler.step(optimizer)
                 scaler.update()
-                optimizer.zero_grad(set_to_none=True)
+
 
                 # 记录损失和指标
                 train_losses.append(loss.item())  # 恢复原始损失大小
@@ -243,6 +284,7 @@ def train_model(
                 })
             except Exception as e:
                 print(f"\nError in batch {batch_idx}: {str(e)}")
+                scaler = GradScaler()
                 continue
             finally:
                 # 清理显存
@@ -321,7 +363,7 @@ def train_model(
                 val_loader,
                 device,
                 vis_dir,
-                num_samples=4
+                num_samples=5
             )
 
             # 添加TensorBoard图像
@@ -405,7 +447,7 @@ if __name__ == '__main__':
     # 设置训练参数
     train_params = {
         'train_dir': r"I:\RA-MED\VertTiltFormer\keypoint_detection\Data\data\train",
-        'val_dir': r"I:\RA-MED\VertTiltFormer\keypoint_detection\Data\data\train",
+        'val_dir': r"I:\RA-MED\VertTiltFormer\keypoint_detection\Data\data\test",
         'model_save_dir': r"I:\RA-MED\VertTiltFormer\keypoint_detection\Data\checkpoints",
         'num_epochs': 100,
         'batch_size': 16,
@@ -413,7 +455,10 @@ if __name__ == '__main__':
         'max_grad_norm': 1.0,    
         'warmup_epochs': 5,     
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-        'num_keypoints': 18
+        'num_keypoints': 18,
+        'max_aug_samples': 1,
+        'resume_from_checkpoint': r"I:\RA-MED\VertTiltFormer\keypoint_detection\Data\checkpoints\best_model.pth",  # 设置为checkpoint路径以继续训练
+        'start_epoch': 1  # 设置开始的epoch
     }
     
     # 开始训练

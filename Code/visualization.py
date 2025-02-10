@@ -176,7 +176,7 @@ def create_validation_visualization(
         fig_size: tuple = (10, 5)
 ):
     """
-    为验证集创建可视化结果
+    为验证集创建可视化结果，随机选择样本
 
     Args:
         model: 训练好的模型
@@ -184,38 +184,66 @@ def create_validation_visualization(
         device: 设备（'cuda'或'cpu'）
         save_dir: 保存目录
         num_samples: 要可视化的样本数量
+        fig_size: 图像尺寸
     """
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
 
+    # 获取验证集的总样本数
+    total_samples = len(val_loader.dataset)
+
+    # 随机选择要可视化的样本索引
+    selected_indices = np.random.choice(
+        total_samples,
+        min(num_samples, total_samples),
+        replace=False
+    )
+
+    samples_visualized = 0
+
     with torch.no_grad():
         for i, batch in enumerate(val_loader):
-            if i >= num_samples:
-                break
+            batch_size = batch['images'].size(0)
+            batch_start_idx = i * batch_size
+
+            # 检查这个batch中是否有我们要可视化的样本
+            batch_indices = np.where(
+                (selected_indices >= batch_start_idx) &
+                (selected_indices < batch_start_idx + batch_size)
+            )[0]
+
+            if len(batch_indices) == 0:
+                continue
 
             images = batch['images'].to(device)
-            keypoints = batch['keypoints']  # 保持关键点在CPU上
+            keypoints = batch['keypoints']
             transform_params = batch['transform_params']
             original_sizes = batch['original_sizes']
 
             # 获取预测结果
             pred_keypoints = model(images)
 
-            # 为每个批次中的样本创建可视化
-            for j in range(images.size(0)):
-                save_path = os.path.join(save_dir, f'sample_{i}_{j}.png')
+            # 只为选中的样本创建可视化
+            for idx in batch_indices:
+                within_batch_idx = selected_indices[idx] - batch_start_idx
+                save_path = os.path.join(save_dir, f'sample_{samples_visualized}.png')
 
                 try:
                     visualize_predictions(
-                        images[j].cpu(),
-                        pred_keypoints[j].cpu(),
-                        keypoints[j],
-                        transform_params[j],
-                        original_sizes[j],
+                        images[within_batch_idx].cpu(),
+                        pred_keypoints[within_batch_idx].cpu(),
+                        keypoints[within_batch_idx],
+                        transform_params[within_batch_idx],
+                        original_sizes[within_batch_idx],
                         save_path,
                         fig_size=fig_size
                     )
+                    samples_visualized += 1
                 except Exception as e:
-                    print(f"Error visualizing sample {i}_{j}: {str(e)}")
+                    print(f"Error visualizing sample {samples_visualized}: {str(e)}")
                 finally:
-                    plt.close()  # 确保图像被关闭，释放内存
+                    plt.close()
+
+            # 如果已经可视化了足够的样本，就退出
+            if samples_visualized >= num_samples:
+                break
