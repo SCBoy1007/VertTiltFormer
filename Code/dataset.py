@@ -38,6 +38,28 @@ class KeypointDataset(Dataset):
         # 初始化数据增强器，传入最大增强样本数量
         self.augmentation = KeypointAugmentation(max_aug_samples=max_aug_samples)
 
+    def read_angles(self, file_path):
+        """读取角度标注文件"""
+        angles = []
+        base_name = os.path.splitext(file_path)[0]
+        angle_path = base_name.replace('keypoints', 'centerline_angles') + '.txt'
+
+        try:
+            with open(angle_path, 'r') as f:
+                for line in f:
+                    if line.strip():  # 忽略空行
+                        angle = float(line.strip())
+                        angles.append(angle)
+        except Exception as e:
+            print(f"Error reading angle file {angle_path}: {e}")
+            return None
+
+        return np.array(angles)
+
+    def recover_angles(self, pred_angles):
+        """从归一化范围恢复到原始角度范围"""
+        # 从[-1, 1]恢复到[-90, 90]
+        return pred_angles * 90.0
     def read_annotation(self, file_path):
         """Read keypoint annotations from file"""
         keypoints = []
@@ -67,8 +89,8 @@ class KeypointDataset(Dataset):
                     print(f"Error: {e}")
         return np.array(keypoints)
 
-    def process_image_and_keypoints(self, image, keypoints):
-        """Process image and keypoints to target size 768x256"""
+    def process_image_and_keypoints(self, image, keypoints, angles):
+        """Process image, keypoints and angles to target size and normalized range"""
         # 获取原始尺寸
         orig_w, orig_h = image.size
 
@@ -84,14 +106,18 @@ class KeypointDataset(Dataset):
 
         # 调整关键点坐标
         keypoints = keypoints.copy()
-        keypoints[:, 0] = keypoints[:, 0] * scale_w  # x坐标使用宽度的缩放比例
-        keypoints[:, 1] = keypoints[:, 1] * scale_h  # y坐标使用高度的缩放比例
+        keypoints[:, 0] = keypoints[:, 0] * scale_w
+        keypoints[:, 1] = keypoints[:, 1] * scale_h
 
         # 归一化关键点坐标到[0,1]范围
         keypoints[:, 0] = keypoints[:, 0] / target_w
         keypoints[:, 1] = keypoints[:, 1] / target_h
 
-        return image, keypoints, ((scale_w, scale_h), orig_w, orig_h, 0)
+        # 归一化角度到[-1,1]范围
+        angles = angles.copy()
+        angles = angles / 90.0  # 从[-90,90]归一化到[-1,1]
+
+        return image, keypoints, angles, ((scale_w, scale_h), orig_w, orig_h, 0)
 
     def recover_coordinates(self, pred_keypoints, transform_params):
         """恢复预测的关键点到原始图像坐标系"""
@@ -109,50 +135,43 @@ class KeypointDataset(Dataset):
         return pred_keypoints
 
     def __getitem__(self, index):
-        """根据索引返回数据样本"""
-        # 计算原始样本索引和增强样本索引
         original_idx = index // self.augmentation.max_aug_samples
         aug_idx = index % self.augmentation.max_aug_samples
 
-        # 获取当前样本的图片和标注路径
         img_path, ann_path = self.samples[original_idx]
-
-        # 读取图像为灰度图
         image = Image.open(img_path).convert('L')
 
-        # 读取关键点标注
+        # 读取关键点和角度
         keypoints = self.read_annotation(ann_path)
+        angles = self.read_angles(ann_path)
 
-        # 对图像和关键点进行预处理（调整到目标尺寸）
-        image, keypoints, transform_params = self.process_image_and_keypoints(image, keypoints)
+        # 处理数据
+        image, keypoints, angles, transform_params = self.process_image_and_keypoints(
+            image, keypoints, angles)
+
+        # 从transform_params中解包出原始尺寸
         (scale_w, scale_h), orig_w, orig_h, _ = transform_params
 
-        # 如果是训练模式，进行数据增强
+        # 数据增强
         if self.train:
-            aug_images, aug_keypoints = self.augmentation(image, keypoints)
-            # 使用aug_idx选择对应的增强样本
+            aug_images, aug_keypoints, aug_angles = self.augmentation(image, keypoints, angles)
             image = aug_images[aug_idx]
             keypoints = aug_keypoints[aug_idx]
+            angles = aug_angles[aug_idx]
 
-        # 将图像转换为tensor
+        # 转换为tensor
         img_tensor = F.to_tensor(image)
+        kp_tensor = torch.tensor(keypoints, dtype=torch.float32)
+        angles_tensor = torch.tensor(angles, dtype=torch.float32)
 
-        # 确保关键点是tensor
-        if isinstance(keypoints, torch.Tensor):
-            kp_tensor = keypoints
-        else:
-            kp_tensor = torch.tensor(keypoints, dtype=torch.float32)
-
-        # 构建返回的字典
-        sample = {
+        return {
             'image': img_tensor,
             'keypoints': kp_tensor,
+            'angles': angles_tensor,
             'transform_params': transform_params,
             'image_id': os.path.basename(img_path),
-            'original_size': (orig_w, orig_h)
+            'original_size': (orig_w, orig_h)  # 使用解包后的orig_w和orig_h
         }
-
-        return sample
 
     def __len__(self):
         if self.train:
@@ -176,27 +195,36 @@ class KeypointAugmentation:
             return torch.from_numpy(data).float()
         return data
 
-    def __call__(self, image, keypoints):
-        """应用数据增强到图像和关键点"""
+    def __call__(self, image, keypoints, angles):
+        """应用数据增强到图像、关键点和角度"""
         keypoints = self._ensure_tensor(keypoints)
+        angles = self._ensure_tensor(angles)
 
-        # 生成所有可能的增强样本
-        all_augmented_images = [image]  # 原始图像
-        all_augmented_keypoints = [keypoints]  # 原始关键点
+        all_augmented_images = [image]
+        all_augmented_keypoints = [keypoints]
+        all_augmented_angles = [angles]
 
-        # 平移增强（4个样本）
+        # 平移增强（角度保持不变）
         translated_images, translated_keypoints = self.translate([image], [keypoints])
+        translated_angles = [angles.clone() for _ in range(len(translated_images))]
+
         all_augmented_images.extend(translated_images)
         all_augmented_keypoints.extend(translated_keypoints)
+        all_augmented_angles.extend(translated_angles)
 
-        # 镜像增强（对所有已有样本进行镜像，再生成5个）
-        mirrored_images, mirrored_keypoints = self.mirror(all_augmented_images, all_augmented_keypoints)
+        # 镜像增强
+        mirrored_images, mirrored_keypoints, mirrored_angles = self.mirror(
+            all_augmented_images,
+            all_augmented_keypoints,
+            all_augmented_angles
+        )
+
         all_augmented_images.extend(mirrored_images)
         all_augmented_keypoints.extend(mirrored_keypoints)
+        all_augmented_angles.extend(mirrored_angles)
 
-        # 如果需要的样本数小于最大数量，随机选择所需数量的样本
+        # 选择需要的样本数
         if self.max_aug_samples < len(all_augmented_images):
-            # 始终保留原始图像（索引0），从其余样本中随机选择
             indices = [0] + list(np.random.choice(
                 range(1, len(all_augmented_images)),
                 size=self.max_aug_samples - 1,
@@ -204,11 +232,13 @@ class KeypointAugmentation:
             ))
             augmented_images = [all_augmented_images[i] for i in indices]
             augmented_keypoints = [all_augmented_keypoints[i] for i in indices]
+            augmented_angles = [all_augmented_angles[i] for i in indices]
         else:
             augmented_images = all_augmented_images
             augmented_keypoints = all_augmented_keypoints
+            augmented_angles = all_augmented_angles
 
-        return augmented_images, augmented_keypoints
+        return augmented_images, augmented_keypoints, augmented_angles
 
     def translate(self, images, keypoints_list):
         """水平平移增强，生成左右两个方向的1/3和2/3位置的样本"""
@@ -278,54 +308,57 @@ class KeypointAugmentation:
 
         return translated_images, translated_keypoints
 
-    def mirror(self, images, keypoints_list):
+    def mirror(self, images, keypoints_list, angles_list):
         """水平镜像增强"""
         mirrored_images = []
         mirrored_keypoints = []
+        mirrored_angles = []
 
-        for image, keypoints in zip(images, keypoints_list):
+        for image, keypoints, angles in zip(images, keypoints_list, angles_list):
             keypoints = self._ensure_tensor(keypoints)
+            angles = self._ensure_tensor(angles)
+
             # 镜像图像
             mirrored_image = F.hflip(image)
-            # 镜像关键点（只镜像 x 坐标）
+            # 镜像关键点
             mirrored_kps = keypoints.clone()
             mirrored_kps[:, 0] = 1 - mirrored_kps[:, 0]
+            # 镜像角度（取反）
+            mirrored_angs = -angles.clone()
+
             mirrored_images.append(mirrored_image)
             mirrored_keypoints.append(mirrored_kps)
+            mirrored_angles.append(mirrored_angs)
 
-        return mirrored_images, mirrored_keypoints
+        return mirrored_images, mirrored_keypoints, mirrored_angles
 
 
 def collate_fn(batch):
-    """自定义的 collate 函数"""
     images = []
     keypoints = []
+    angles = []
     transform_params = []
     image_ids = []
     original_sizes = []
 
     for sample in batch:
-        # 处理图像
         img = sample['image']
         if len(img.shape) == 2:
             img = img.unsqueeze(0)
         images.append(img)
 
-        # 处理关键点
-        kp = sample['keypoints']
-        keypoints.append(kp.view(-1, 2))
-
-        # 收集其他信息
+        keypoints.append(sample['keypoints'].view(-1, 2))
+        angles.append(sample['angles'])
         transform_params.append(sample['transform_params'])
         image_ids.append(sample['image_id'])
         original_sizes.append(sample['original_size'])
 
-    # 堆叠所有图像
     images = torch.stack(images)
 
     return {
         'images': images,
         'keypoints': keypoints,
+        'angles': angles,
         'transform_params': transform_params,
         'image_ids': image_ids,
         'original_sizes': original_sizes

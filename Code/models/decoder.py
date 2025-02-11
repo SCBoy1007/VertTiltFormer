@@ -197,6 +197,16 @@ class EfficientKeypointDecoder(nn.Module):
             nn.Sigmoid()
         )
 
+        self.angle_head = nn.Sequential(
+            nn.Linear(dim // 2, dim // 4),
+            nn.GELU(),
+            nn.Dropout(drop),
+            nn.Linear(dim // 4, dim // 8),
+            nn.GELU(),
+            nn.Linear(dim // 8, 1),
+            nn.Tanh()  # 使用tanh将输出限制在[-1, 1]范围内，对应归一化后的角度
+        )
+
         # 温度参数
         self.temperature = temperature
 
@@ -214,7 +224,7 @@ class EfficientKeypointDecoder(nn.Module):
             memory: torch.Tensor,
             prev_keypoints: Optional[torch.Tensor] = None,
             memory_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         B = memory.shape[0]
 
         # Project queries to full dimension
@@ -238,17 +248,20 @@ class EfficientKeypointDecoder(nn.Module):
         x_coords = self.x_head(shared_features)
         y_coords = self.y_head(shared_features)
 
+        # 预测角度
+        angles = self.angle_head(shared_features)
+
         # 合并坐标 [B, num_keypoints, 2]
         keypoints = torch.cat([x_coords, y_coords], dim=-1)
 
-        return keypoints
+        return keypoints, angles
 
     def forward(
             self,
             memory: torch.Tensor,
             prev_keypoints: Optional[torch.Tensor] = None,
             memory_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:  # 修改返回类型为元组
         if self.use_checkpointing and self.training and torch.is_grad_enabled():
             memory.requires_grad_(True)
             if prev_keypoints is not None:
