@@ -12,12 +12,14 @@ class KeypointDataset(Dataset):
     def __init__(
             self,
             img_dir: str,
-            annotation_dir: str,
+            keypoints_dir: str,  # 改为keypoints_dir
+            angles_dir: str,     # 新增angles_dir
             train: bool = True,
-            max_aug_samples: int = 2  # 添加新参数
+            max_aug_samples: int = 2
     ):
         self.img_dir = img_dir
-        self.annotation_dir = annotation_dir
+        self.keypoints_dir = keypoints_dir  # 更新
+        self.angles_dir = angles_dir        # 新增
         self.train = train
 
         # 获取所有有效的图像-标注对
@@ -27,23 +29,23 @@ class KeypointDataset(Dataset):
                 continue
 
             base_name = os.path.splitext(img_name)[0]
-            ann_path = os.path.join(annotation_dir, base_name + '.txt')
+            keypoints_path = os.path.join(keypoints_dir, base_name + '.txt')  # 更新
+            angles_path = os.path.join(angles_dir, base_name + '.txt')       # 新增
 
-            if os.path.exists(ann_path):
+            # 检查所有必要文件是否存在
+            if os.path.exists(keypoints_path) and os.path.exists(angles_path):
                 self.samples.append((
                     os.path.join(img_dir, img_name),
-                    ann_path
+                    keypoints_path,
+                    angles_path
                 ))
 
-        # 初始化数据增强器，传入最大增强样本数量
+        # 初始化数据增强器
         self.augmentation = KeypointAugmentation(max_aug_samples=max_aug_samples)
 
-    def read_angles(self, file_path):
+    def read_angles(self, angle_path):
         """读取角度标注文件"""
         angles = []
-        base_name = os.path.splitext(file_path)[0]
-        angle_path = base_name.replace('keypoints', 'centerline_angles') + '.txt'
-
         try:
             with open(angle_path, 'r') as f:
                 for line in f:
@@ -138,12 +140,13 @@ class KeypointDataset(Dataset):
         original_idx = index // self.augmentation.max_aug_samples
         aug_idx = index % self.augmentation.max_aug_samples
 
-        img_path, ann_path = self.samples[original_idx]
+        # 更新为三元组解包
+        img_path, keypoints_path, angles_path = self.samples[original_idx]
         image = Image.open(img_path).convert('L')
 
         # 读取关键点和角度
-        keypoints = self.read_annotation(ann_path)
-        angles = self.read_angles(ann_path)
+        keypoints = self.read_annotation(keypoints_path)
+        angles = self.read_angles(angles_path)  # 直接使用angles_path
 
         # 处理数据
         image, keypoints, angles, transform_params = self.process_image_and_keypoints(
@@ -159,10 +162,21 @@ class KeypointDataset(Dataset):
             keypoints = aug_keypoints[aug_idx]
             angles = aug_angles[aug_idx]
 
-        # 转换为tensor
+        # 转换为tensor，确保angles_tensor的形状正确
         img_tensor = F.to_tensor(image)
-        kp_tensor = torch.tensor(keypoints, dtype=torch.float32)
-        angles_tensor = torch.tensor(angles, dtype=torch.float32)
+        if isinstance(keypoints, torch.Tensor):
+            kp_tensor = keypoints.clone().detach()
+        else:
+            kp_tensor = torch.tensor(keypoints, dtype=torch.float32)
+
+        if isinstance(angles, torch.Tensor):
+            angles_tensor = angles.clone().detach()
+        else:
+            angles_tensor = torch.tensor(angles, dtype=torch.float32)
+
+        # 确保angles_tensor是2D的
+        if len(angles_tensor.shape) == 1:
+            angles_tensor = angles_tensor.view(-1)
 
         return {
             'image': img_tensor,
@@ -170,7 +184,7 @@ class KeypointDataset(Dataset):
             'angles': angles_tensor,
             'transform_params': transform_params,
             'image_id': os.path.basename(img_path),
-            'original_size': (orig_w, orig_h)  # 使用解包后的orig_w和orig_h
+            'original_size': (orig_w, orig_h)
         }
 
     def __len__(self):
@@ -354,11 +368,13 @@ def collate_fn(batch):
         original_sizes.append(sample['original_size'])
 
     images = torch.stack(images)
+    # 将angles转换为tensor
+    angles = torch.stack(angles)
 
     return {
         'images': images,
         'keypoints': keypoints,
-        'angles': angles,
+        'angles': angles,  # 现在是tensor了
         'transform_params': transform_params,
         'image_ids': image_ids,
         'original_sizes': original_sizes

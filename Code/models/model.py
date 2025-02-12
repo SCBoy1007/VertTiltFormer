@@ -123,47 +123,50 @@ class KeypointDetector(nn.Module):
         if self.use_checkpointing and self.training:
             return checkpoint(self.keypoint_decoder, x)
         return self.keypoint_decoder(x)
-    
+
     def forward(
-        self,
-        x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+            self,
+            x: torch.Tensor,
+            mask: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:  # 修改返回类型为元组
         """
         Forward pass through the network.
-        
+
         Args:
             x: Input tensor of shape (B, C, H, W)
             mask: Optional attention mask
-        
+
         Returns:
-            Predicted keypoint coordinates of shape (B, num_keypoints, 2)
+            Tuple of:
+                - Predicted keypoint coordinates of shape (B, num_keypoints, 2)
+                - Predicted angles of shape (B, num_keypoints)
         """
         # 1. Extract features using CNN backbone
         features = self.backbone(x)  # (B, embed_dim, H', W')
         B, C, H, W = features.shape
-        
+
         # 2. Reshape features and add position encoding
         features = features.flatten(2).transpose(1, 2)  # (B, H'*W', embed_dim)
-        
+
         # Verify feature dimensions match expected size
         if features.size(1) != self.feat_h * self.feat_w:
-            raise ValueError(f"Feature map size mismatch. Expected {self.feat_h * self.feat_w} positions, got {features.size(1)}")
-            
+            raise ValueError(
+                f"Feature map size mismatch. Expected {self.feat_h * self.feat_w} positions, got {features.size(1)}")
+
         features = self.pos_encoding(features)
-        
-        # 3. Process through transformer encoder (features already in correct shape B, H*W, D)
+
+        # 3. Process through transformer encoder
         memory = self._forward_transformer_encoder(features)
-        
-        # 5. Decode keypoints
-        keypoints = self._forward_keypoint_decoder(memory)
-        
+
+        # 4. Decode keypoints and angles
+        keypoints, angles = self._forward_keypoint_decoder(memory)
+
         # Clear unnecessary tensors
         del features, memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        
-        return keypoints
+
+        return keypoints, angles
 
 def create_model(
     img_size: Tuple[int, int] = (768, 256),
@@ -205,7 +208,7 @@ if __name__ == "__main__":
         embed_dim=256,
         num_encoder_layers=6,
         num_decoder_layers=6,
-        num_keypoints=17,
+        num_keypoints=18,
         use_checkpointing=True
     )
     

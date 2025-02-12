@@ -5,34 +5,80 @@ import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw
 import cv2
 from typing import List, Tuple
+import math
+
+
+def extend_line_to_image_borders(point, angle_rad, image_shape):
+    """计算线段与图像边界的交点"""
+    height, width = image_shape[:2]
+    x0, y0 = point
+
+    # 计算斜率和截距
+    if abs(math.cos(angle_rad)) < 1e-10:  # 近似垂直线
+        return [(x0, 0), (x0, height)]
+
+    slope = math.tan(angle_rad)
+    b = y0 - slope * x0
+
+    # 可能的交点
+    intersections = []
+
+    # 与左边界的交点
+    x, y = 0, b
+    if 0 <= y <= height:
+        intersections.append((x, y))
+
+    # 与右边界的交点
+    x, y = width, slope * width + b
+    if 0 <= y <= height:
+        intersections.append((x, y))
+
+    # 与上边界的交点
+    if abs(slope) > 1e-10:  # 不是水平线
+        x, y = -b / slope, 0
+        if 0 <= x <= width:
+            intersections.append((x, y))
+
+    # 与下边界的交点
+    if abs(slope) > 1e-10:  # 不是水平线
+        x, y = (height - b) / slope, height
+        if 0 <= x <= width:
+            intersections.append((x, y))
+
+    # 如果找到少于两个交点，返回原始点
+    if len(intersections) < 2:
+        return [(x0, y0), (x0, y0)]
+
+    # 返回距离最远的两个交点
+    intersections = sorted(intersections, key=lambda p: (p[0] - x0) ** 2 + (p[1] - y0) ** 2)
+    return [intersections[0], intersections[-1]]
 
 
 def draw_keypoints_on_image(
         image: Image.Image,
         keypoints: np.ndarray,
+        angles: np.ndarray = None,
         radius: int = 3,
         color: Tuple[int, int, int] = (255, 0, 0),
+        angle_color: Tuple[int, int, int] = (0, 0, 255),
         draw_order: bool = True,
         order_color: Tuple[int, int, int] = (0, 255, 0),
         violation_color: Tuple[int, int, int] = (255, 0, 0)
 ) -> Image.Image:
-    """
-    在图像上绘制关键点和它们之间的连接
-
-    Args:
-        image: PIL图像
-        keypoints: 关键点坐标数组 (N, 2)
-        radius: 关键点圆圈的半径
-        color: 关键点的颜色
-        draw_order: 是否绘制关键点之间的连接线
-        order_color: 正常顺序连接线的颜色
-        violation_color: 违反顺序连接线的颜色
-
-    Returns:
-        绘制了关键点的图像
-    """
-    # 转换为PIL的Draw对象
+    """在图像上绘制关键点、连接线和倾斜角度"""
     draw = ImageDraw.Draw(image)
+
+    # 绘制倾斜角度线
+    if angles is not None:
+        for (x, y), angle in zip(keypoints, angles):
+            angle_rad = math.radians(angle)
+            endpoints = extend_line_to_image_borders((x, y), angle_rad, image.size[::-1])
+            draw.line(
+                [(endpoints[0][0], endpoints[0][1]),
+                 (endpoints[1][0], endpoints[1][1])],
+                fill=angle_color,
+                width=1
+            )
 
     # 绘制关键点
     for x, y in keypoints:
@@ -47,11 +93,7 @@ def draw_keypoints_on_image(
         for i in range(len(keypoints) - 1):
             x1, y1 = keypoints[i]
             x2, y2 = keypoints[i + 1]
-
-            # 检查是否违反顺序（y坐标应该递减）
             line_color = violation_color if y2 > y1 else order_color
-
-            # 绘制连接线
             draw.line(
                 [(x1, y1), (x2, y2)],
                 fill=line_color,
@@ -60,19 +102,18 @@ def draw_keypoints_on_image(
 
     return image
 
-
 def visualize_predictions(
         image: torch.Tensor,
         pred_keypoints: torch.Tensor,
         target_keypoints: torch.Tensor,
         transform_params: tuple,
         original_size: tuple,
+        pred_angles: torch.Tensor = None,
+        target_angles: torch.Tensor = None,
         save_path: str = None,
         fig_size: tuple = (20, 10)
 ) -> None:
-    """
-    可视化预测结果，支持RGB和灰度图像，并还原到原始图像尺寸
-    """
+    """可视化预测结果，包括关键点位置和倾斜角度"""
     # 转换图像为numpy数组
     img_np = image.permute(1, 2, 0).numpy()
 
@@ -112,13 +153,21 @@ def visualize_predictions(
     plt.close('all')
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=fig_size)
 
+    # 转换角度从[-1, 1]到度数
+    if pred_angles is not None:
+        pred_angles = pred_angles.cpu().numpy() * 90  # 将[-1, 1]范围转换为[-90, 90]度
+    if target_angles is not None:
+        target_angles = target_angles.cpu().numpy() * 90
+
     # 绘制预测结果
     img_pred = img_pil.copy()
     img_pred = draw_keypoints_on_image(
         img_pred,
         pred_kpts,
+        angles=pred_angles,  # 现在传入的是度数
         radius=5,
         color=(255, 0, 0),
+        angle_color=(0, 0, 255),
         draw_order=True,
         order_color=(0, 255, 0),
         violation_color=(255, 0, 0)
@@ -127,13 +176,15 @@ def visualize_predictions(
     ax1.set_title('Predictions')
     ax1.axis('off')
 
-    # 绘制目标关键点
+    # 绘制目标关键点和角度
     img_target = img_pil.copy()
     img_target = draw_keypoints_on_image(
         img_target,
         target_kpts,
+        angles=target_angles,  # 现在传入的是度数
         radius=5,
         color=(0, 255, 0),
+        angle_color=(0, 0, 255),
         draw_order=True,
         order_color=(0, 255, 0)
     )
@@ -173,19 +224,10 @@ def create_validation_visualization(
         device: str,
         save_dir: str,
         num_samples: int = 5,
-        fig_size: tuple = (10, 5)
+        fig_size: tuple = (10, 5),
+        show_angles: bool = True
 ):
-    """
-    为验证集创建可视化结果，随机选择样本
-
-    Args:
-        model: 训练好的模型
-        val_loader: 验证数据加载器
-        device: 设备（'cuda'或'cpu'）
-        save_dir: 保存目录
-        num_samples: 要可视化的样本数量
-        fig_size: 图像尺寸
-    """
+    """为验证集创建可视化结果，随机选择样本"""
     os.makedirs(save_dir, exist_ok=True)
     model.eval()
 
@@ -217,11 +259,12 @@ def create_validation_visualization(
 
             images = batch['images'].to(device)
             keypoints = batch['keypoints']
+            angles = batch.get('angles', None)  # 使用get方法安全地获取angles
             transform_params = batch['transform_params']
             original_sizes = batch['original_sizes']
 
             # 获取预测结果
-            pred_keypoints = model(images)
+            pred_keypoints, pred_angles = model(images)
 
             # 只为选中的样本创建可视化
             for idx in batch_indices:
@@ -235,15 +278,17 @@ def create_validation_visualization(
                         keypoints[within_batch_idx],
                         transform_params[within_batch_idx],
                         original_sizes[within_batch_idx],
+                        pred_angles[within_batch_idx].cpu() if show_angles else None,
+                        angles[within_batch_idx].cpu() if angles is not None and show_angles else None,
                         save_path,
                         fig_size=fig_size
                     )
                     samples_visualized += 1
                 except Exception as e:
                     print(f"Error visualizing sample {samples_visualized}: {str(e)}")
+                    print(f"Error details: {type(e).__name__}")
                 finally:
                     plt.close()
 
-            # 如果已经可视化了足够的样本，就退出
             if samples_visualized >= num_samples:
                 break
